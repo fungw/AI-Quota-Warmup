@@ -31,13 +31,70 @@ call.
 Note that 24 isn't divisible by 5. The default targets give four windows a day
 with a deliberate ~9h gap overnight, in exchange for boundaries that stay put.
 
+## Setup
+
+1. **Create a Cloudflare account**, if you don't already have one, at
+   [dash.cloudflare.com/sign-up](https://dash.cloudflare.com/sign-up). The
+   free plan is enough — Cron Triggers and Workers KV are both available on
+   it.
+
+2. **Install dependencies:**
+
+   ```bash
+   cd worker
+   pnpm install
+   ```
+
+3. **Log in to Cloudflare** so `wrangler` can deploy on your behalf. This
+   opens a browser window to authorize the CLI:
+
+   ```bash
+   pnpm wrangler login
+   ```
+
+4. **Generate a Claude Code OAuth token.** This is the only required secret
+   — it's what the Worker uses to ping the Anthropic API as you:
+
+   ```bash
+   claude setup-token
+   ```
+
+   Copy the token it prints.
+
+5. **Set the secret on the Worker.** `wrangler secret put` prompts for a
+   value — paste the token from the previous step:
+
+   ```bash
+   pnpm wrangler secret put CLAUDE_CODE_OAUTH_TOKEN
+   ```
+
+6. **Create the KV namespace** the Worker uses to remember window state:
+
+   ```bash
+   pnpm wrangler kv namespace create WARMUP_STATE
+   ```
+
+   This prints an `id`. Paste it into `wrangler.toml`, replacing
+   `id = "REPLACE_ME"`.
+
+7. **Edit `wrangler.toml`** to fit your schedule:
+
+   - `TARGET_TIMEZONE` — set to your own IANA zone (e.g. `America/New_York`), so `TARGETS_LOCAL` is read in your local time rather than the `UTC` default.
+   - `TARGETS_LOCAL` — adjust the target wall-clock times if the defaults (`06:00,11:00,16:00,21:00`) don't fit your schedule.
+
+8. **Deploy:**
+
+   ```bash
+   pnpm run deploy
+   ```
+
 ## Testing
 
 ```bash
-npm test              # runs the suite once
-npm run test:watch    # reruns on save
-npm run test:coverage # runs with the 100% coverage gate enforced
-npm run typecheck     # src/ and test/ separately, since they use different type roots
+pnpm test              # runs the suite once
+pnpm run test:watch    # reruns on save
+pnpm run test:coverage # runs with the 100% coverage gate enforced
+pnpm run typecheck     # src/ and test/ separately, since they use different type roots
 ```
 
 Tests run inside the real Workers runtime via `@cloudflare/vitest-pool-workers`
@@ -50,35 +107,13 @@ exercised via injected `fetchImpl`/`sleep`/`now` seams instead. See
 CI (`.github/workflows/test.yml`) runs `typecheck` and `test:coverage` on every
 push and PR.
 
-## Setup
-
-```bash
-cd worker
-npm install
-npx wrangler login
-
-# The only required secret. Generate with `claude setup-token`.
-npx wrangler secret put CLAUDE_CODE_OAUTH_TOKEN
-
-# Create the state store, then paste the printed id into wrangler.toml
-# (it replaces id = "REPLACE_ME").
-npx wrangler kv namespace create WARMUP_STATE
-
-npm run deploy
-```
-
-Before that last step, also edit `wrangler.toml`:
-
-- `TARGET_TIMEZONE` — set to your own IANA zone (e.g. `America/New_York`), so `TARGETS_LOCAL` is read in your local time rather than the `UTC` default.
-- `TARGETS_LOCAL` — adjust the target wall-clock times if the defaults (`06:00,11:00,16:00,21:00`) don't fit your schedule.
-
 ## Verifying it works
 
 The Worker has no public route (`workers_dev = false`), so verification goes
 through logs rather than HTTP:
 
 ```bash
-npm run tail        # live ticks as they fire
+pnpm run tail        # live ticks as they fire
 ```
 
 Every 10 minutes you should see a `run.skipped` (usually `no-target`), and at
@@ -91,7 +126,7 @@ the real API:
 
 ```bash
 printf 'CLAUDE_CODE_OAUTH_TOKEN=<token>\nDEBUG_TRIGGER_SECRET=local\n' > .dev.vars
-npx wrangler dev --test-scheduled
+pnpm wrangler dev --test-scheduled
 
 # in another shell — fires the cron path
 curl "http://localhost:8799/cdn-cgi/handler/scheduled?cron=*/10+*+*+*+*"
