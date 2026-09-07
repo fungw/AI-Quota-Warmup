@@ -79,7 +79,7 @@ with a deliberate ~9h gap overnight, in exchange for boundaries that stay put.
 
 7. **Edit `wrangler.toml`** to fit your schedule:
 
-   - `TARGET_TIMEZONE` — set to your own IANA zone (e.g. `America/New_York`), so `TARGETS_LOCAL` is read in your local time rather than the `UTC` default.
+   - `TARGET_TIMEZONE` — set to your own IANA zone (e.g. `America/New_York` / `Europe/Dublin`), so `TARGETS_LOCAL` is read in your local time rather than the `UTC` default.
    - `TARGETS_LOCAL` — adjust the target wall-clock times if the defaults (`06:00,11:00,16:00,21:00`) don't fit your schedule.
 
 8. **Deploy:**
