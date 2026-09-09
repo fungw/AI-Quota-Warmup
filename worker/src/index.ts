@@ -1,6 +1,7 @@
 /**
- * Scheduled warm-up ping to the Anthropic API, to open Claude Code's
- * 5-hour rate-limit window at predictable times of day.
+ * Scheduled warm-up pings to the configured AI providers at predictable times
+ * of day. Claude Code's 5-hour rate-limit window is gated from its reset header;
+ * other providers have their own semantics.
  *
  * Why this is more than a cron: a warm-up ping only opens a new window if the
  * previous one has already expired. A ping that lands inside an open window is

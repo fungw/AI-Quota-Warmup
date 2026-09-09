@@ -1,8 +1,8 @@
-# Claude Code Cloudflare worker
+# Quota Warmup Worker
 
-Cloudflare Worker that opens Claude Code's 5-hour rate-limit window at
-predictable times of day and can also warm the OpenAI API from the same cron
-tick.
+Cloudflare Worker that warms configured AI-provider quotas at predictable times
+of day. Claude Code's 5-hour rate-limit window is gated from its reset header;
+OpenAI is tracked independently from the same cron tick.
 
 ## Providers
 

@@ -1,22 +1,22 @@
-# 🔥 Claude Code & GPT Cloudflare 🚀
+# 🔥 Quota Warmup 🚀
 
-> Automatically warm up your Claude Code rate limit window so it resets right before your work session.
+> Automatically warm configured AI-provider quotas before your work session.
 
 ---
 
 ## The Problem
 
-Claude Code's rate limits work on a **rolling 5-hour window** — the clock starts from your **first request**, not midnight. So if you sleep in and start at noon, you get a short window for the day.
+AI providers enforce rate limits and usage windows that can begin with your first request. For Claude Code, this is a **rolling 5-hour window** — so if you sleep in and start at noon, you get a short window for the day.
 
-**Solution:** Send a tiny warm-up message a few hours before you plan to work. The 5-hour window starts then, resets before you begin, and you get full quota.
+**Solution:** Send a tiny warm-up message before you plan to work. The configured providers receive their own request, with provider-specific state and gating.
 
 ---
 
 ## How It Works
 
 This runs as a **Cloudflare Worker** (see [`worker/`](worker/)). By default it
-warms Claude Code. Set `WARMUP_PROVIDERS = "claude,openai"` to warm both
-subscriptions from one deployment; see the provider notes in
+w arms Claude Code. Set `WARMUP_PROVIDERS = "claude,openai"` to warm both
+providers from one deployment; see the provider notes in
 [`worker/README.md`](worker/README.md).
 
 1. The Worker ticks every 10 minutes and checks whether it's near one of your configured local target times (e.g. 6 AM)

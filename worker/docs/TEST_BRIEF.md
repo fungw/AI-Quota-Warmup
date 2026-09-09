@@ -1,4 +1,4 @@
-# Test brief — claude-warmup worker
+# Test brief — quota-warmup worker
 
 **One line:** take `worker/src/index.ts` from 0% to ~100% covered by fast,
 deterministic tests that run in the real workerd runtime and never call the

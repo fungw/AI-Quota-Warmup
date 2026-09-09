@@ -4,7 +4,7 @@
 # workerd binary bundled with the installed @cloudflare/vitest-pool-workers
 # version caps out earlier than "today" — a local test-tooling limit, not a
 # statement about what's safe to deploy. Never used for `wrangler deploy`.
-name = "claude-warmup-test"
+name = "quota-warmup-test"
 main = "src/index.ts"
 compatibility_date = "2026-08-22"
 

@@ -1,4 +1,4 @@
-# Test plan — claude-warmup worker
+# Test plan — quota-warmup worker
 
 Companion to [`TEST_BRIEF.md`](TEST_BRIEF.md). That document argues *why*; this
 one is the implementation plan: tooling, refactor, phasing, and the full case

@@ -1,4 +1,4 @@
-name = "claude-warmup"
+name = "quota-warmup"
 main = "src/index.ts"
 compatibility_date = "2026-09-04"
 
@@ -23,7 +23,7 @@ crons = ["*/10 * * * *"]
 [[kv_namespaces]]
 binding = "WARMUP_STATE"
 # Paste the id printed by `wrangler kv namespace create WARMUP_STATE`.
-id = "REPLACE_ME"
+id = "6dfb93bbe33643778a398483d1de84e9"
 
 [vars]
 # Comma-separated providers. `claude` is the default; use `claude,openai` to
