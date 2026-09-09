@@ -1,6 +1,6 @@
 import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
-import { EMPTY_STATE, readState, STATE_KEY, writeState, type State } from "../src/state";
+import { EMPTY_STATE, LEGACY_STATE_KEY, readState, STATE_KEY, writeState, type State } from "../src/state";
 import { makeEnv } from "./helpers";
 
 describe("readState / writeState", () => {
@@ -47,5 +47,13 @@ describe("readState / writeState", () => {
         await writeState(testEnv, state);
         const reread = await readState(testEnv);
         expect(reread).toEqual(state);
+    });
+
+    it("lazily migrates the legacy Claude state key", async () => {
+        const state: State = { ...EMPTY_STATE, firedTarget: "legacy" };
+        await env.WARMUP_STATE.put(LEGACY_STATE_KEY, JSON.stringify(state));
+        const testEnv = makeEnv({ WARMUP_STATE: env.WARMUP_STATE });
+        expect(await readState(testEnv)).toEqual(state);
+        expect(await env.WARMUP_STATE.get(STATE_KEY, "json")).toEqual(state);
     });
 });

@@ -1,7 +1,36 @@
 # Claude Code Cloudflare worker
 
 Cloudflare Worker that opens Claude Code's 5-hour rate-limit window at
-predictable times of day. Calls `api.anthropic.com` directly.
+predictable times of day and can also warm the OpenAI API from the same cron
+tick.
+
+## Providers
+
+`WARMUP_PROVIDERS` is a comma-separated list of providers to run on each due
+target. It defaults to `claude` for existing deployments:
+
+| Value | Credential | Behaviour |
+|---|---|---|
+| `claude` (default) | `CLAUDE_CODE_OAUTH_TOKEN` | Preserves the original Claude Code 5-hour-window logic. |
+| `openai` | `OPENAI_API_KEY` | Sends a Responses API request at each target slot. OpenAI API rate limits are request/token buckets, not a documented Claude-style 5-hour session window, so the Worker does **not** fabricate or gate on a five-hour reset. |
+
+For both subscriptions, set `WARMUP_PROVIDERS = "claude,openai"`. Each provider
+has independent KV state and credentials, so a missing or failed credential
+does not stop the other provider. `WARMUP_PROVIDER` remains a deprecated
+single-provider compatibility alias.
+
+The OpenAI integration uses `POST /v1/responses`, Bearer API-key authentication,
+`store: false`, and defaults to `gpt-5.2`. Override the model with `GPT_MODEL`
+when needed. This affects OpenAI Platform API usage and billing; it does not
+warm or reset limits for the ChatGPT website/app subscription.
+
+To switch to GPT:
+
+```bash
+pnpm wrangler secret put OPENAI_API_KEY
+# Set WARMUP_PROVIDERS = "claude,openai" (or "openai") in wrangler.toml.
+pnpm run deploy
+```
 
 ## How it decides to ping
 
@@ -155,6 +184,7 @@ One JSON line per event. The `run.success` / `run.failure` summary carries:
 | `driftMs` | The gap between those two measured |
 | `finishedAt` / `totalMs` | Wall-clock cost of the whole run |
 | `url` / `model` | Exactly what was hit |
+| `provider` | The provider for each per-provider event/result |
 | `tokenFingerprint` | `len=… …abcd`, to confirm *which* token is deployed |
 | `attempts[]` | Per-try status, duration, and error body |
 | `attempts[].headers` | Anthropic's `request-id` and `anthropic-ratelimit-*` state |
@@ -165,6 +195,10 @@ One JSON line per event. The `run.success` / `run.failure` summary carries:
 | `newResetAt` / `newResetSource` | Boundary after the ping; `header` or `fallback:+5h` |
 | `rateLimit` | Full `anthropic-ratelimit-*` set, incl. 5h/7d utilization |
 | `reason` (on `run.skipped`) | `no-target`, `already-served`, `window-still-open` |
+
+With multiple providers, `/run` returns `action: "aggregate"` and a `results`
+array containing one report per provider. `/health` returns the enabled
+providers, model, credential-presence flag, and independent state for each.
 
 A `no-target` line carries no window fields at all — that decision is made from
 the clock before KV is read, so those ticks cost no storage read either.

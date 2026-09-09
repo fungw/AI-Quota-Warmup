@@ -42,6 +42,42 @@ describe("GET /health", () => {
         expect(body.tokenConfigured).toBe(true);
     });
 
+    it("reports the selected OpenAI provider and model", async () => {
+        const ctx = createExecutionContext();
+        const res = await worker.fetch(new Request("https://example.com/health"), {
+            ...env,
+            WARMUP_PROVIDER: "openai",
+            OPENAI_API_KEY: "test-key",
+            GPT_MODEL: "test-gpt",
+        }, ctx);
+        const body = await res.json<Record<string, unknown>>();
+        expect(body).toMatchObject({ provider: "openai", model: "test-gpt", tokenConfigured: true });
+    });
+
+    it("uses the default GPT model when no override is configured", async () => {
+        const ctx = createExecutionContext();
+        const res = await worker.fetch(new Request("https://example.com/health"), {
+            ...env, WARMUP_PROVIDER: "openai", OPENAI_API_KEY: "test-key", GPT_MODEL: undefined,
+        }, ctx);
+        expect((await res.json<Record<string, unknown>>()).model).toBe("gpt-5.2");
+    });
+
+    it("reports independent health details for both providers", async () => {
+        const ctx = createExecutionContext();
+        const res = await worker.fetch(new Request("https://example.com/health"), {
+            ...env,
+            WARMUP_PROVIDERS: "claude,openai",
+            CLAUDE_CODE_OAUTH_TOKEN: "claude-token",
+            OPENAI_API_KEY: "openai-key",
+            GPT_MODEL: "gpt-test",
+        }, ctx);
+        const body = await res.json<{ providers: Array<Record<string, unknown>> }>();
+        expect(body.providers).toEqual([
+            expect.objectContaining({ provider: "claude", tokenConfigured: true }),
+            expect.objectContaining({ provider: "openai", model: "gpt-test", tokenConfigured: true }),
+        ]);
+    });
+
     it("reports manualTriggerEnabled based on DEBUG_TRIGGER_SECRET (G4)", async () => {
         const res = await SELF.fetch("https://example.com/health");
         const body = await res.json<Record<string, unknown>>();

@@ -17,3 +17,4 @@ id = "test-namespace"
 # SELF.fetch()-based tests; individual tests override it to test the
 # missing-token path.
 CLAUDE_CODE_OAUTH_TOKEN = "test-token-from-wrangler-test-toml"
+OPENAI_API_KEY = "test-openai-key-from-wrangler-test-toml"

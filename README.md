@@ -1,4 +1,4 @@
-# 🔥 Claude Code Cloudflare 🚀
+# 🔥 Claude Code & GPT Cloudflare 🚀
 
 > Automatically warm up your Claude Code rate limit window so it resets right before your work session.
 
@@ -14,7 +14,10 @@ Claude Code's rate limits work on a **rolling 5-hour window** — the clock star
 
 ## How It Works
 
-This runs as a **Cloudflare Worker** (see [`worker/`](worker/)):
+This runs as a **Cloudflare Worker** (see [`worker/`](worker/)). By default it
+warms Claude Code. Set `WARMUP_PROVIDERS = "claude,openai"` to warm both
+subscriptions from one deployment; see the provider notes in
+[`worker/README.md`](worker/README.md).
 
 1. The Worker ticks every 10 minutes and checks whether it's near one of your configured local target times (e.g. 6 AM)
 2. It pings the Anthropic API directly with your `CLAUDE_CODE_OAUTH_TOKEN`

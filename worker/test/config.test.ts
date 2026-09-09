@@ -151,4 +151,31 @@ describe("resolveConfig", () => {
         const result = resolveConfig(makeEnv({ WARMUP_STATE: env.WARMUP_STATE }));
         expect(result.ok && result.config.timeZone).toBe("Europe/Dublin");
     });
+
+    it("accepts the OpenAI provider and rejects unknown providers", () => {
+        const openai = resolveConfig(makeEnv({ WARMUP_STATE: env.WARMUP_STATE, WARMUP_PROVIDER: "openai" }));
+        expect(openai.ok && openai.config.provider).toBe("openai");
+        const invalid = resolveConfig(makeEnv({ WARMUP_STATE: env.WARMUP_STATE, WARMUP_PROVIDER: "gpt" }));
+        expect(invalid.ok).toBe(false);
+        expect(!invalid.ok && invalid.error).toMatch(/WARMUP_PROVIDER/);
+        const invalidAlias = resolveConfig(makeEnv({ WARMUP_STATE: env.WARMUP_STATE, WARMUP_PROVIDERS: undefined, WARMUP_PROVIDER: "gpt" }));
+        expect(invalidAlias.ok).toBe(false);
+    });
+
+    it("resolves both providers and rejects duplicate or conflicting settings", () => {
+        const both = resolveConfig(makeEnv({ WARMUP_PROVIDERS: "claude, openai", WARMUP_STATE: env.WARMUP_STATE }));
+        expect(both.ok && both.config.providers).toEqual(["claude", "openai"]);
+        const duplicate = resolveConfig(makeEnv({ WARMUP_PROVIDERS: "claude,claude", WARMUP_STATE: env.WARMUP_STATE }));
+        expect(duplicate.ok).toBe(false);
+        expect(!duplicate.ok && duplicate.error).toMatch(/Duplicate/);
+        const conflict = resolveConfig(makeEnv({ WARMUP_PROVIDERS: "claude", WARMUP_PROVIDER: "openai", WARMUP_STATE: env.WARMUP_STATE }));
+        expect(conflict.ok).toBe(false);
+        expect(!conflict.ok && conflict.error).toMatch(/disagree/);
+    });
+
+    it("rejects an explicitly empty provider list", () => {
+        const result = resolveConfig(makeEnv({ WARMUP_PROVIDERS: ",", WARMUP_STATE: env.WARMUP_STATE }));
+        expect(result.ok).toBe(false);
+        expect(!result.ok && result.error).toMatch(/empty/);
+    });
 });

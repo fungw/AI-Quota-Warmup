@@ -26,6 +26,13 @@ binding = "WARMUP_STATE"
 id = "REPLACE_ME"
 
 [vars]
+# Comma-separated providers. `claude` is the default; use `claude,openai` to
+# warm both subscriptions on each due target.
+WARMUP_PROVIDERS = "claude,openai"
+
+# Optional model override when WARMUP_PROVIDERS includes `openai`. The code defaults to
+# gpt-5.2; keep this in vars so it can be changed without a code deploy.
+# GPT_MODEL = "gpt-5.2"
 # Local wall-clock times to anchor each 5h window to, interpreted in
 # TARGET_TIMEZONE below. 24h isn't divisible by 5, so four leave a
 # deliberate ~9h gap overnight in exchange for stable boundaries.

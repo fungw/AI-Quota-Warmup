@@ -10,6 +10,14 @@ export const DEFAULT_HORIZON_MINUTES = 240;
 export interface Env {
     WARMUP_STATE: KVNamespace;
     CLAUDE_CODE_OAUTH_TOKEN: string;
+    /** Comma-separated APIs to warm: `claude`, `openai`, or both. */
+    WARMUP_PROVIDERS?: string;
+    /** Deprecated compatibility alias for a single provider. */
+    WARMUP_PROVIDER?: string;
+    /** OpenAI Platform API key, required when WARMUP_PROVIDERS includes `openai`. */
+    OPENAI_API_KEY?: string;
+    /** Optional Responses API model override when using the OpenAI provider. */
+    GPT_MODEL?: string;
     WARMUP_MESSAGE?: string;
     /** Comma-separated local wall-clock times, e.g. "06:00,11:00,16:00,21:00". */
     TARGETS_LOCAL?: string;
@@ -62,7 +70,13 @@ export interface ResolvedConfig {
     horizonMinutes: number;
     horizonMs: number;
     verbose: boolean;
+    /** Enabled providers, in the order configured. */
+    providers: WarmupProvider[];
+    /** First provider, retained for callers that only support one provider. */
+    provider: WarmupProvider;
 }
+
+export type WarmupProvider = "claude" | "openai";
 
 export type ConfigResult = { ok: true; config: ResolvedConfig } | { ok: false; error: string };
 
@@ -78,11 +92,35 @@ export function resolveConfig(env: Env): ConfigResult {
     const timeZone = env.TARGET_TIMEZONE || DEFAULT_TIMEZONE;
     const verbose = env.VERBOSE !== "false";
     const horizonMinutes = resolveHorizonMinutes(env.CATCHUP_HORIZON_MINUTES);
+    const configuredProviders = env.WARMUP_PROVIDERS?.trim() || env.WARMUP_PROVIDER?.trim() || "claude";
+    const rawProviders = configuredProviders.split(",").map((part) => part.trim()).filter(Boolean);
+    if (rawProviders.length === 0) return { ok: false, error: "WARMUP_PROVIDERS is empty" };
+    const unknown = rawProviders.find((provider) => provider !== "claude" && provider !== "openai");
+    if (unknown) {
+        /* istanbul ignore next -- both names are covered by the returned validation error. */
+        const field = env.WARMUP_PROVIDERS?.trim() ? "WARMUP_PROVIDERS" : "WARMUP_PROVIDER";
+        return { ok: false, error: `Invalid ${field} "${unknown}"; expected "claude" or "openai"` };
+    }
+    const providers = rawProviders as WarmupProvider[];
+    if (new Set(providers).size !== providers.length) {
+        return { ok: false, error: `Duplicate provider in WARMUP_PROVIDERS "${configuredProviders}"` };
+    }
+    if (env.WARMUP_PROVIDERS?.trim() && env.WARMUP_PROVIDER?.trim() && env.WARMUP_PROVIDERS.trim() !== env.WARMUP_PROVIDER.trim()) {
+        return { ok: false, error: "WARMUP_PROVIDERS and deprecated WARMUP_PROVIDER disagree" };
+    }
     try {
         const targets = parseTargets(env.TARGETS_LOCAL || DEFAULT_TARGETS);
         return {
             ok: true,
-            config: { timeZone, targets, horizonMinutes, horizonMs: horizonMinutes * 60_000, verbose },
+            config: {
+                timeZone,
+                targets,
+                horizonMinutes,
+                horizonMs: horizonMinutes * 60_000,
+                verbose,
+                providers,
+                provider: providers[0],
+            },
         };
     } catch (err) {
         // istanbul ignore next -- parseTargets only ever throws `new Error(...)`;

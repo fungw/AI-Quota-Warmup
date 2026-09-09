@@ -46,7 +46,6 @@ export default {
         const url = new URL(request.url);
 
         if (url.pathname === "/health") {
-            const state = await readState(env);
             const now = new Date();
             const configResult = resolveConfig(env);
 
@@ -59,25 +58,42 @@ export default {
                 );
             }
             const { config } = configResult;
+            const providerHealth = await Promise.all(
+                config.providers.map(async (provider) => {
+                    const state = await readState(env, provider);
+                    const isOpenAi = provider === "openai";
+                    return {
+                        provider,
+                        model: isOpenAi ? env.GPT_MODEL || "gpt-5.2" : "claude-haiku-4-5-20251001",
+                        tokenConfigured: Boolean(isOpenAi ? env.OPENAI_API_KEY : env.CLAUDE_CODE_OAUTH_TOKEN),
+                        state: {
+                            ...state,
+                            nextResetAtIso:
+                                state.nextResetAt === null ? null : new Date(state.nextResetAt).toISOString(),
+                            minutesUntilReset:
+                                state.nextResetAt === null
+                                    ? null
+                                    : Math.round((state.nextResetAt - now.getTime()) / 60_000),
+                        },
+                    };
+                }),
+            );
+            const first = providerHealth[0];
 
             return Response.json({
                 ok: true,
                 now: now.toISOString(),
                 targetsLocal: env.TARGETS_LOCAL || DEFAULT_TARGETS,
                 targetTimezone: config.timeZone,
+                providers: providerHealth,
+                // Compatibility fields for existing single-provider clients.
+                provider: config.provider,
+                model: first.model,
                 catchupHorizonMinutes: config.horizonMinutes,
                 currentTargetSlot: currentTarget(now, config.targets, config.timeZone, config.horizonMs)?.toISOString() ?? null,
-                tokenConfigured: Boolean(env.CLAUDE_CODE_OAUTH_TOKEN),
+                tokenConfigured: first.tokenConfigured,
                 manualTriggerEnabled: Boolean(env.DEBUG_TRIGGER_SECRET),
-                state: {
-                    ...state,
-                    nextResetAtIso:
-                        state.nextResetAt === null ? null : new Date(state.nextResetAt).toISOString(),
-                    minutesUntilReset:
-                        state.nextResetAt === null
-                            ? null
-                            : Math.round((state.nextResetAt - now.getTime()) / 60_000),
-                },
+                state: first.state,
             });
         }
 
