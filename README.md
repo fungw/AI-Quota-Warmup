@@ -1,4 +1,4 @@
-# 🔥 Quota Warmup 🚀
+# 🔥 AI-Quote-Warmup 🚀
 
 > Automatically warm configured AI-provider quotas before your work session.
 
@@ -43,6 +43,13 @@ That last window opens at midnight, burning a ping on a window nobody's awake to
 Now the ~9-hour gap falls overnight, where it's free, and every window lands during hours you're actually likely to be working — much better session window allocation for the same four pings a day. This is the worker's default (`TARGETS_LOCAL = "06:00,11:00,16:00,21:00"`); adjust it to fit your own schedule.
 
 Full setup, configuration, and the gating design are documented in [`worker/README.md`](worker/README.md).
+
+## Supported providers
+
+AI-Quote-Warmup currently supports **Claude** and **OpenAI** only. Configure
+one or both with `WARMUP_PROVIDERS = "claude,openai"`. Each provider uses its
+own credential and independent state; additional providers are not supported
+yet.
 
 ---
 

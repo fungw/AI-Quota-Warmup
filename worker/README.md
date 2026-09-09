@@ -1,10 +1,13 @@
-# Quota Warmup Worker
+# AI-Quote-Warmup Worker
 
 Cloudflare Worker that warms configured AI-provider quotas at predictable times
 of day. Claude Code's 5-hour rate-limit window is gated from its reset header;
 OpenAI is tracked independently from the same cron tick.
 
 ## Providers
+
+AI-Quote-Warmup currently supports **Claude** and **OpenAI** only. Other AI
+providers are not supported yet.
 
 `WARMUP_PROVIDERS` is a comma-separated list of providers to run on each due
 target. It defaults to `claude` for existing deployments:
@@ -81,8 +84,9 @@ with a deliberate ~9h gap overnight, in exchange for boundaries that stay put.
    pnpm wrangler login
    ```
 
-4. **Generate a Claude Code OAuth token.** This is the only required secret
-   — it's what the Worker uses to ping the Anthropic API as you:
+4. **Generate a Claude Code OAuth token** (required when `claude` is included
+   in `WARMUP_PROVIDERS`). This is what the Worker uses to ping the Anthropic
+   API as you:
 
    ```bash
    claude setup-token
@@ -97,7 +101,21 @@ with a deliberate ~9h gap overnight, in exchange for boundaries that stay put.
    pnpm wrangler secret put CLAUDE_CODE_OAUTH_TOKEN
    ```
 
-6. **Create the KV namespace** the Worker uses to remember window state:
+6. **Add OpenAI** (required when `openai` is included in
+   `WARMUP_PROVIDERS`). Create an API key at
+   [platform.openai.com/api-keys](https://platform.openai.com/api-keys), then
+   store it as a Worker secret:
+
+   ```bash
+   pnpm wrangler secret put OPENAI_API_KEY
+   ```
+
+   In `wrangler.toml`, set `WARMUP_PROVIDERS = "claude,openai"` to enable both
+   providers, or `WARMUP_PROVIDERS = "openai"` for OpenAI only. OpenAI API usage
+   requires OpenAI Platform billing/credits and is separate from a ChatGPT
+   subscription.
+
+7. **Create the KV namespace** the Worker uses to remember window state:
 
    ```bash
    pnpm wrangler kv namespace create WARMUP_STATE
@@ -106,12 +124,12 @@ with a deliberate ~9h gap overnight, in exchange for boundaries that stay put.
    This prints an `id`. Paste it into `wrangler.toml`, replacing
    `id = "REPLACE_ME"`.
 
-7. **Edit `wrangler.toml`** to fit your schedule:
+8. **Edit `wrangler.toml`** to fit your schedule:
 
    - `TARGET_TIMEZONE` — set to your own IANA zone (e.g. `America/New_York` / `Europe/Dublin`), so `TARGETS_LOCAL` is read in your local time rather than the `UTC` default.
    - `TARGETS_LOCAL` — adjust the target wall-clock times if the defaults (`06:00,11:00,16:00,21:00`) don't fit your schedule.
 
-8. **Deploy:**
+9. **Deploy:**
 
    ```bash
    pnpm run deploy
