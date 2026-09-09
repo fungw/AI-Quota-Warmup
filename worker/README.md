@@ -27,7 +27,7 @@ The OpenAI integration uses `POST /v1/responses`, Bearer API-key authentication,
 when needed. This affects OpenAI Platform API usage and billing; it does not
 warm or reset limits for the ChatGPT website/app subscription.
 
-To switch to GPT:
+To add GPT:
 
 ```bash
 pnpm wrangler secret put OPENAI_API_KEY
