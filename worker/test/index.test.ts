@@ -42,24 +42,31 @@ describe("GET /health", () => {
         expect(body.tokenConfigured).toBe(true);
     });
 
-    it("reports the selected OpenAI provider and model", async () => {
+    it("reports the selected OpenAI provider and Fly runner configuration", async () => {
         const ctx = createExecutionContext();
         const res = await worker.fetch(new Request("https://example.com/health"), {
             ...env,
             WARMUP_PROVIDER: "openai",
-            OPENAI_API_KEY: "test-key",
-            GPT_MODEL: "test-gpt",
+            GPT_WARMUP_URL: "https://runner.example/warmup",
+            GPT_WARMUP_SECRET: "test-key",
         }, ctx);
         const body = await res.json<Record<string, unknown>>();
-        expect(body).toMatchObject({ provider: "openai", model: "test-gpt", tokenConfigured: true });
+        expect(body).toMatchObject({
+            provider: "openai",
+            model: "codex-subscription-default",
+            tokenConfigured: true,
+        });
     });
 
-    it("uses the default GPT model when no override is configured", async () => {
+    it("reports the subscription-default Codex model", async () => {
         const ctx = createExecutionContext();
         const res = await worker.fetch(new Request("https://example.com/health"), {
-            ...env, WARMUP_PROVIDER: "openai", OPENAI_API_KEY: "test-key", GPT_MODEL: undefined,
+            ...env,
+            WARMUP_PROVIDER: "openai",
+            GPT_WARMUP_URL: "https://runner.example/warmup",
+            GPT_WARMUP_SECRET: "test-key",
         }, ctx);
-        expect((await res.json<Record<string, unknown>>()).model).toBe("gpt-5.2");
+        expect((await res.json<Record<string, unknown>>()).model).toBe("codex-subscription-default");
     });
 
     it("reports independent health details for both providers", async () => {
@@ -68,13 +75,17 @@ describe("GET /health", () => {
             ...env,
             WARMUP_PROVIDERS: "claude,openai",
             CLAUDE_CODE_OAUTH_TOKEN: "claude-token",
-            OPENAI_API_KEY: "openai-key",
-            GPT_MODEL: "gpt-test",
+            GPT_WARMUP_URL: "https://runner.example/warmup",
+            GPT_WARMUP_SECRET: "runner-key",
         }, ctx);
         const body = await res.json<{ providers: Array<Record<string, unknown>> }>();
         expect(body.providers).toEqual([
             expect.objectContaining({ provider: "claude", tokenConfigured: true }),
-            expect.objectContaining({ provider: "openai", model: "gpt-test", tokenConfigured: true }),
+            expect.objectContaining({
+                provider: "openai",
+                model: "codex-subscription-default",
+                tokenConfigured: true,
+            }),
         ]);
     });
 

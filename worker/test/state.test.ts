@@ -6,6 +6,7 @@ import { makeEnv } from "./helpers";
 describe("readState / writeState", () => {
     beforeEach(async () => {
         await env.WARMUP_STATE.delete(STATE_KEY);
+        await env.WARMUP_STATE.delete(LEGACY_STATE_KEY);
     });
 
     it("returns EMPTY_STATE when the key is absent (E1)", async () => {
@@ -50,10 +51,106 @@ describe("readState / writeState", () => {
     });
 
     it("lazily migrates the legacy Claude state key", async () => {
-        const state: State = { ...EMPTY_STATE, firedTarget: "legacy" };
+        const state: State = {
+            ...EMPTY_STATE,
+            firedTarget: "legacy",
+            lastPingAt: "2026-09-10T06:00:00.000Z",
+            lastOutcome: "success",
+        };
         await env.WARMUP_STATE.put(LEGACY_STATE_KEY, JSON.stringify(state));
         const testEnv = makeEnv({ WARMUP_STATE: env.WARMUP_STATE });
         expect(await readState(testEnv)).toEqual(state);
         expect(await env.WARMUP_STATE.get(STATE_KEY, "json")).toEqual(state);
+    });
+
+    it("reconciles legacy safety fields when a stale provider key already exists", async () => {
+        const current: State = {
+            nextResetAt: Date.parse("2026-09-09T15:00:00.000Z"),
+            firedTarget: "2026-09-09T10:00:00.000Z",
+            lastPingAt: "2026-09-10T08:40:18.000Z",
+            lastOutcome: "failure",
+        };
+        const legacy: State = {
+            nextResetAt: Date.parse("2026-09-10T10:00:00.000Z"),
+            firedTarget: "2026-09-10T05:00:00.000Z",
+            lastPingAt: "2026-09-10T05:00:25.000Z",
+            lastOutcome: "success",
+        };
+        await env.WARMUP_STATE.put(STATE_KEY, JSON.stringify(current));
+        await env.WARMUP_STATE.put(LEGACY_STATE_KEY, JSON.stringify(legacy));
+
+        const expected: State = {
+            nextResetAt: legacy.nextResetAt,
+            firedTarget: legacy.firedTarget,
+            lastPingAt: current.lastPingAt,
+            lastOutcome: current.lastOutcome,
+        };
+        const testEnv = makeEnv({ WARMUP_STATE: env.WARMUP_STATE });
+        expect(await readState(testEnv)).toEqual(expected);
+        expect(await env.WARMUP_STATE.get(STATE_KEY, "json")).toEqual(expected);
+    });
+
+    it("keeps current gating fields when the legacy state has null or older values", async () => {
+        const current: State = {
+            nextResetAt: 200,
+            firedTarget: "2026-09-10T10:00:00.000Z",
+            lastPingAt: "2026-09-10T10:01:00.000Z",
+            lastOutcome: "success",
+        };
+        const legacy: State = {
+            nextResetAt: null,
+            firedTarget: null,
+            lastPingAt: null,
+            lastOutcome: "failure",
+        };
+        await env.WARMUP_STATE.put(STATE_KEY, JSON.stringify(current));
+        await env.WARMUP_STATE.put(LEGACY_STATE_KEY, JSON.stringify(legacy));
+
+        const testEnv = makeEnv({ WARMUP_STATE: env.WARMUP_STATE });
+        expect(await readState(testEnv)).toEqual(current);
+    });
+
+    it("handles invalid legacy timestamps conservatively", async () => {
+        const current: State = {
+            nextResetAt: null,
+            firedTarget: "invalid-current",
+            lastPingAt: "2026-09-10T09:00:00.000Z",
+            lastOutcome: "failure",
+        };
+        const legacy: State = {
+            nextResetAt: 300,
+            firedTarget: "2026-09-10T10:00:00.000Z",
+            lastPingAt: "invalid-legacy",
+            lastOutcome: "success",
+        };
+        await env.WARMUP_STATE.put(STATE_KEY, JSON.stringify(current));
+        await env.WARMUP_STATE.put(LEGACY_STATE_KEY, JSON.stringify(legacy));
+
+        const testEnv = makeEnv({ WARMUP_STATE: env.WARMUP_STATE });
+        expect(await readState(testEnv)).toEqual({
+            nextResetAt: 300,
+            firedTarget: legacy.firedTarget,
+            lastPingAt: current.lastPingAt,
+            lastOutcome: current.lastOutcome,
+        });
+    });
+
+    it("does not rewrite an already reconciled provider key", async () => {
+        const state: State = {
+            nextResetAt: 300,
+            firedTarget: "invalid",
+            lastPingAt: "invalid",
+            lastOutcome: "success",
+        };
+        let writes = 0;
+        const kv = {
+            get: (key: string) => Promise.resolve(key === STATE_KEY ? state : state),
+            put: () => {
+                writes++;
+                return Promise.resolve();
+            },
+        } as unknown as KVNamespace;
+        expect(await readState(makeEnv({ WARMUP_STATE: kv }))).toEqual(state);
+        expect(writes).toBe(0);
     });
 });

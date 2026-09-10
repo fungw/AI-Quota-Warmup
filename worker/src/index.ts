@@ -65,8 +65,12 @@ export default {
                     const isOpenAi = provider === "openai";
                     return {
                         provider,
-                        model: isOpenAi ? env.GPT_MODEL || "gpt-5.2" : "claude-haiku-4-5-20251001",
-                        tokenConfigured: Boolean(isOpenAi ? env.OPENAI_API_KEY : env.CLAUDE_CODE_OAUTH_TOKEN),
+                        model: isOpenAi ? "codex-subscription-default" : "claude-haiku-4-5-20251001",
+                        tokenConfigured: Boolean(
+                            isOpenAi
+                                ? env.GPT_WARMUP_URL && env.GPT_WARMUP_SECRET
+                                : env.CLAUDE_CODE_OAUTH_TOKEN,
+                        ),
                         state: {
                             ...state,
                             nextResetAtIso:

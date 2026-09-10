@@ -17,4 +17,5 @@ id = "test-namespace"
 # SELF.fetch()-based tests; individual tests override it to test the
 # missing-token path.
 CLAUDE_CODE_OAUTH_TOKEN = "test-token-from-wrangler-test-toml"
-OPENAI_API_KEY = "test-openai-key-from-wrangler-test-toml"
+GPT_WARMUP_URL = "https://ai-quota-openai.fly.dev/warmup"
+GPT_WARMUP_SECRET = "test-runner-secret-from-wrangler-test-toml"

@@ -6,6 +6,25 @@ import { jsonResponse, makeEnv, fixedNow, textResponse } from "./helpers";
 
 const TZ_ENV = { TARGET_TIMEZONE: "UTC", TARGETS_LOCAL: "06:00", CATCHUP_HORIZON_MINUTES: "240" };
 const TARGET_06 = Date.UTC(2026, 5, 15, 6, 0); // 15 Jun 2026 06:00 UTC
+const RUNNER_URL = "https://ai-quota-openai.fly.dev/warmup";
+const RUNNER_ENV = { GPT_WARMUP_URL: RUNNER_URL, GPT_WARMUP_SECRET: "test-runner-secret" };
+const runnerResponse = (overrides: Record<string, unknown> = {}) => ({
+    success: true,
+    action: "pinged",
+    reply: "Warmed up!",
+    nextResetAt: TARGET_06 + 5 * 60 * 60 * 1000,
+    rateLimits: {
+        limitId: "codex",
+        planType: "plus",
+        primary: {
+            usedPercent: 1,
+            windowDurationMins: 300,
+            resetsAt: (TARGET_06 + 5 * 60 * 60 * 1000) / 1000,
+        },
+        secondary: null,
+    },
+    ...overrides,
+});
 
 async function countingKv(base: KVNamespace) {
     let reads = 0;
@@ -100,26 +119,198 @@ describe("tick gating", () => {
         expect(report.success).toBe(true);
     });
 
-    it("uses the OpenAI provider without creating a fictional five-hour window", async () => {
-        const testEnv = makeEnv({ WARMUP_STATE: env.WARMUP_STATE, ...TZ_ENV, WARMUP_PROVIDER: "openai", OPENAI_API_KEY: "test-key" });
+    it("uses the Fly Codex runner and persists its authoritative reset", async () => {
+        const testEnv = makeEnv({
+            WARMUP_STATE: env.WARMUP_STATE,
+            ...TZ_ENV,
+            ...RUNNER_ENV,
+            WARMUP_PROVIDER: "openai",
+        });
         const now = fixedNow(new Date(TARGET_06).toISOString());
         let calledUrl: string | URL | Request | undefined;
         const fetchImpl = (url: string | URL | Request) => {
             calledUrl = url;
-            return Promise.resolve(jsonResponse({ output_text: "ok" }));
+            return Promise.resolve(jsonResponse(runnerResponse()));
         };
         const report = await tick(testEnv, { trigger: "manual", cron: null, scheduledTime: null }, { now, fetchImpl });
-        expect(calledUrl).toBe("https://api.openai.com/v1/responses");
+        expect(calledUrl).toBe(RUNNER_URL);
         expect(report.success).toBe(true);
-        expect((report as { newResetSource: string }).newResetSource).toBe("provider:no-session-window");
+        expect((report as { newResetSource: string }).newResetSource).toBe("runner:codex-rate-limits");
+        expect((report as { newResetAt: string }).newResetAt).toBe(new Date(TARGET_06 + 5 * 60 * 60 * 1000).toISOString());
     });
 
-    it("fails fast when the selected OpenAI provider has no API key", async () => {
-        const testEnv = makeEnv({ WARMUP_STATE: env.WARMUP_STATE, ...TZ_ENV, WARMUP_PROVIDER: "openai", OPENAI_API_KEY: "" });
+    it("accepts a live runner skip and persists the authoritative reset", async () => {
+        const testEnv = makeEnv({
+            WARMUP_STATE: env.WARMUP_STATE,
+            ...TZ_ENV,
+            ...RUNNER_ENV,
+            WARMUP_PROVIDER: "openai",
+        });
+        const reset = TARGET_06 + 90_000;
+        const now = fixedNow(new Date(TARGET_06).toISOString());
+        const report = await tick(
+            testEnv,
+            { trigger: "manual", cron: null, scheduledTime: null },
+            {
+                now,
+                fetchImpl: () => Promise.resolve(jsonResponse(runnerResponse({
+                    action: "skipped",
+                    reason: "window-still-open",
+                    nextResetAt: reset,
+                }))),
+            },
+        );
+        expect(report).toMatchObject({
+            action: "skipped",
+            reason: "window-still-open",
+            success: true,
+            newResetAt: new Date(reset).toISOString(),
+            newResetSource: "runner:codex-rate-limits",
+        });
+        expect((await env.WARMUP_STATE.get<State>(stateKey("openai"), "json"))?.nextResetAt).toBe(reset);
+    });
+
+    it("retains a null reset when a live runner skip cannot report one", async () => {
+        const testEnv = makeEnv({
+            WARMUP_STATE: env.WARMUP_STATE,
+            ...TZ_ENV,
+            ...RUNNER_ENV,
+            WARMUP_PROVIDER: "openai",
+        });
+        const now = fixedNow(new Date(TARGET_06).toISOString());
+        const report = await tick(
+            testEnv,
+            { trigger: "manual", cron: null, scheduledTime: null },
+            {
+                now,
+                fetchImpl: () => Promise.resolve(jsonResponse(runnerResponse({
+                    action: "skipped",
+                    reason: "window-still-open",
+                    nextResetAt: null,
+                }))),
+            },
+        );
+        expect((report as { newResetAt: null }).newResetAt).toBeNull();
+    });
+
+    it("reports a successful OpenAI ping even if the runner omits a reset", async () => {
+        const testEnv = makeEnv({
+            WARMUP_STATE: env.WARMUP_STATE,
+            ...TZ_ENV,
+            ...RUNNER_ENV,
+            WARMUP_PROVIDER: "openai",
+        });
+        const now = fixedNow(new Date(TARGET_06).toISOString());
+        const report = await tick(
+            testEnv,
+            { trigger: "manual", cron: null, scheduledTime: null },
+            {
+                now,
+                fetchImpl: () => Promise.resolve(jsonResponse(runnerResponse({
+                    reply: undefined,
+                    nextResetAt: null,
+                    rateLimits: null,
+                }))),
+            },
+        );
+        expect(report).toMatchObject({
+            action: "pinged",
+            success: true,
+            newResetAt: null,
+            newResetSource: "runner:no-reset-reported",
+        });
+    });
+
+    it("records an OpenAI runner failure without replacing existing state", async () => {
+        const previous: State = {
+            nextResetAt: TARGET_06 - 60_000,
+            firedTarget: "2020-01-01T00:00:00.000Z",
+            lastPingAt: null,
+            lastOutcome: null,
+        };
+        await writeState(makeEnv({ WARMUP_STATE: env.WARMUP_STATE }), previous, "openai");
+        const testEnv = makeEnv({
+            WARMUP_STATE: env.WARMUP_STATE,
+            ...TZ_ENV,
+            ...RUNNER_ENV,
+            WARMUP_PROVIDER: "openai",
+        });
+        const now = fixedNow(new Date(TARGET_06).toISOString());
+        const report = await tick(
+            testEnv,
+            { trigger: "manual", cron: null, scheduledTime: null },
+            { now, fetchImpl: () => Promise.resolve(textResponse("denied", { status: 401 })) },
+        );
+        expect(report).toMatchObject({ action: "pinged", success: false, error: "denied" });
+        expect(await env.WARMUP_STATE.get<State>(stateKey("openai"), "json")).toMatchObject({
+            nextResetAt: previous.nextResetAt,
+            firedTarget: previous.firedTarget,
+            lastOutcome: "failure",
+        });
+    });
+
+    it("uses the run id as OpenAI's idempotency key for a forced off-schedule ping", async () => {
+        const testEnv = makeEnv({
+            WARMUP_STATE: env.WARMUP_STATE,
+            ...TZ_ENV,
+            ...RUNNER_ENV,
+            WARMUP_PROVIDER: "openai",
+        });
+        const now = fixedNow(new Date(Date.UTC(2026, 5, 15, 14, 0)).toISOString());
+        let idempotencyKey = "";
+        const report = await tick(
+            testEnv,
+            { trigger: "manual", cron: null, scheduledTime: null, force: true },
+            {
+                now,
+                fetchImpl: async (_url, init) => {
+                    idempotencyKey = (init?.headers as Record<string, string>)["Idempotency-Key"];
+                    return jsonResponse(runnerResponse());
+                },
+            },
+        );
+        expect(idempotencyKey).toBe(report.runId);
+    });
+
+    it("fails fast when the selected OpenAI provider has no runner secret", async () => {
+        const testEnv = makeEnv({
+            WARMUP_STATE: env.WARMUP_STATE,
+            ...TZ_ENV,
+            WARMUP_PROVIDER: "openai",
+            GPT_WARMUP_URL: RUNNER_URL,
+            GPT_WARMUP_SECRET: "",
+        });
         const now = fixedNow(new Date(TARGET_06).toISOString());
         const report = await tick(testEnv, { trigger: "manual", cron: null, scheduledTime: null }, { now });
         expect(report.success).toBe(false);
-        expect((report as { error: string }).error).toMatch(/OPENAI_API_KEY is not set/);
+        expect((report as { error: string }).error).toMatch(/GPT_WARMUP_SECRET is not set/);
+    });
+
+    it("fails fast when the selected OpenAI provider has no runner URL", async () => {
+        const testEnv = makeEnv({
+            WARMUP_STATE: env.WARMUP_STATE,
+            ...TZ_ENV,
+            WARMUP_PROVIDER: "openai",
+            GPT_WARMUP_URL: "",
+            GPT_WARMUP_SECRET: "test-runner-secret",
+        });
+        const now = fixedNow(new Date(TARGET_06).toISOString());
+        const report = await tick(testEnv, { trigger: "manual", cron: null, scheduledTime: null }, { now });
+        expect(report.success).toBe(false);
+        expect((report as { error: string }).error).toMatch(/GPT_WARMUP_URL is not set/);
+    });
+
+    it("fails fast when the selected OpenAI provider omits the runner URL", async () => {
+        const testEnv = makeEnv({
+            WARMUP_STATE: env.WARMUP_STATE,
+            ...TZ_ENV,
+            WARMUP_PROVIDER: "openai",
+            GPT_WARMUP_URL: undefined,
+            GPT_WARMUP_SECRET: "test-runner-secret",
+        });
+        const now = fixedNow(new Date(TARGET_06).toISOString());
+        const report = await tick(testEnv, { trigger: "manual", cron: null, scheduledTime: null }, { now });
+        expect((report as { error: string }).error).toMatch(/GPT_WARMUP_URL is not set/);
     });
 
     it("F6: nextResetAt exactly equal to now -> pings (strict <)", async () => {
@@ -291,13 +482,17 @@ describe("tick gating", () => {
             WARMUP_STATE: env.WARMUP_STATE,
             ...TZ_ENV,
             WARMUP_PROVIDERS: "claude,openai",
-            OPENAI_API_KEY: "test-key",
+            ...RUNNER_ENV,
         });
         const now = fixedNow(new Date(TARGET_06).toISOString());
         const urls: string[] = [];
         const fetchImpl = (url: string | URL | Request) => {
             urls.push(String(url));
-            return Promise.resolve(jsonResponse({ content: [{ type: "text", text: "ok" }], output_text: "ok" }));
+            return Promise.resolve(
+                String(url) === RUNNER_URL
+                    ? jsonResponse(runnerResponse())
+                    : jsonResponse({ content: [{ type: "text", text: "ok" }] }),
+            );
         };
         const report = await tick(testEnv, { trigger: "manual", cron: null, scheduledTime: null }, { now, fetchImpl });
         expect(report.action).toBe("aggregate");
@@ -306,15 +501,21 @@ describe("tick gating", () => {
             expect.objectContaining({ provider: "claude", success: true }),
             expect.objectContaining({ provider: "openai", success: true }),
         ]);
-        expect(urls).toEqual(expect.arrayContaining(["https://api.anthropic.com/v1/messages", "https://api.openai.com/v1/responses"]));
+        expect(urls).toEqual(expect.arrayContaining(["https://api.anthropic.com/v1/messages", RUNNER_URL]));
         expect(await env.WARMUP_STATE.get("warmup-state:claude", "json")).not.toBeNull();
         expect(await env.WARMUP_STATE.get("warmup-state:openai", "json")).not.toBeNull();
     });
 
     it("does not let a missing provider secret block the other provider", async () => {
-        const testEnv = makeEnv({ WARMUP_STATE: env.WARMUP_STATE, ...TZ_ENV, WARMUP_PROVIDERS: "claude,openai", CLAUDE_CODE_OAUTH_TOKEN: "", OPENAI_API_KEY: "test-key" });
+        const testEnv = makeEnv({
+            WARMUP_STATE: env.WARMUP_STATE,
+            ...TZ_ENV,
+            ...RUNNER_ENV,
+            WARMUP_PROVIDERS: "claude,openai",
+            CLAUDE_CODE_OAUTH_TOKEN: "",
+        });
         const now = fixedNow(new Date(TARGET_06).toISOString());
-        const fetchImpl = () => Promise.resolve(jsonResponse({ output_text: "ok" }));
+        const fetchImpl = () => Promise.resolve(jsonResponse(runnerResponse()));
         const report = await tick(testEnv, { trigger: "manual", cron: null, scheduledTime: null }, { now, fetchImpl });
         expect(report.success).toBe(false);
         const results = (report as { results: Array<{ provider: string; success: boolean; error?: string }> }).results;
@@ -343,12 +544,21 @@ describe("tick gating", () => {
     });
 
     it("does not call either provider again for a duplicate target", async () => {
-        const testEnv = makeEnv({ WARMUP_STATE: env.WARMUP_STATE, ...TZ_ENV, WARMUP_PROVIDERS: "claude,openai", OPENAI_API_KEY: "test-key" });
+        const testEnv = makeEnv({
+            WARMUP_STATE: env.WARMUP_STATE,
+            ...TZ_ENV,
+            ...RUNNER_ENV,
+            WARMUP_PROVIDERS: "claude,openai",
+        });
         const now = fixedNow(new Date(TARGET_06).toISOString());
         let calls = 0;
-        const fetchImpl = () => {
+        const fetchImpl = (url: string | URL | Request) => {
             calls++;
-            return Promise.resolve(jsonResponse({ content: [{ type: "text", text: "ok" }], output_text: "ok" }));
+            return Promise.resolve(
+                String(url) === RUNNER_URL
+                    ? jsonResponse(runnerResponse())
+                    : jsonResponse({ content: [{ type: "text", text: "ok" }] }),
+            );
         };
         await tick(testEnv, { trigger: "manual", cron: null, scheduledTime: null }, { now, fetchImpl });
         const duplicate = await tick(testEnv, { trigger: "manual", cron: null, scheduledTime: null }, { now, fetchImpl });

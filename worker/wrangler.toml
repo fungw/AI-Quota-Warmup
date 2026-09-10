@@ -1,4 +1,4 @@
-name = "quota-warmup"
+name = "ai-quota-warmup"
 main = "src/index.ts"
 compatibility_date = "2026-09-04"
 
@@ -30,9 +30,9 @@ id = "6dfb93bbe33643778a398483d1de84e9"
 # warm both subscriptions on each due target.
 WARMUP_PROVIDERS = "claude,openai"
 
-# Optional model override when WARMUP_PROVIDERS includes `openai`. The code defaults to
-# gpt-5.2; keep this in vars so it can be changed without a code deploy.
-# GPT_MODEL = "gpt-5.2"
+# Subscription-authenticated Codex runner. GPT_WARMUP_SECRET is stored with
+# `wrangler secret put` and must match the Fly app's WARMUP_SHARED_SECRET.
+GPT_WARMUP_URL = "https://ai-quota-openai.fly.dev/warmup"
 # Local wall-clock times to anchor each 5h window to, interpreted in
 # TARGET_TIMEZONE below. 24h isn't divisible by 5, so four leave a
 # deliberate ~9h gap overnight in exchange for stable boundaries.
@@ -41,7 +41,7 @@ TARGETS_LOCAL = "06:00,11:00,16:00,21:00"
 # IANA zone the times above are read in — set this to your own zone. The
 # Worker resolves each target's actual UTC offset per day via Intl, so this
 # tracks DST automatically.
-TARGET_TIMEZONE = "UTC"
+TARGET_TIMEZONE = "Europe/Dublin"
 
 # How long after a target we keep retrying if the previous window is still open.
 # Must stay below the gap between targets.
