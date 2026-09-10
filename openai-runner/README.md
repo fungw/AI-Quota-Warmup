@@ -15,15 +15,15 @@ Codex device-code login while connected through `fly ssh console`.
 ## Deployment
 
 ```bash
-fly apps create ai-quota-openai
-fly volumes create codex_data --app ai-quota-openai --region lhr --size 1
-fly secrets set --app ai-quota-openai WARMUP_SHARED_SECRET=<random-secret>
-fly deploy --app ai-quota-openai --ha=false
-fly ssh console --app ai-quota-openai --command 'codex login --device-auth'
+fly apps create your-fly-app
+fly volumes create codex_data --app your-fly-app --region lhr --size 1
+fly secrets set --app your-fly-app WARMUP_SHARED_SECRET=<random-secret>
+fly deploy --app your-fly-app --ha=false
+fly ssh console --app your-fly-app --command 'codex login --device-auth'
 ```
 
 Use the same random secret for the Cloudflare Worker's `GPT_WARMUP_SECRET`.
-The Worker URL is `https://ai-quota-openai.fly.dev/warmup`.
+The Worker URL is `https://your-fly-app.fly.dev/warmup`.
 
 The runner queries `account/rateLimits/read` before making a model request. If
 the current Codex window is still open, it returns the real reset timestamp

@@ -2,6 +2,8 @@
 
 > Open Claude Code and ChatGPT/Codex quota windows before your work session.
 
+[![Test Coverage](https://coveralls.io/repos/github/fungw/AI-Quota-Warmup/badge.svg?branch=main)](https://coveralls.io/github/fungw/AI-Quota-Warmup?branch=main)
+
 AI providers start rolling usage windows when the first request is made. If
 that request happens late, the rest of the day's reset boundaries move with it.
 AI-Quota-Warmup checks every 10 minutes and sends a tiny request near configured
@@ -17,7 +19,7 @@ flowchart LR
     Cron[Cloudflare cron<br/>every 10 minutes] --> Worker[ai-quota-warmup<br/>Cloudflare Worker]
     Worker --> KV[(Workers KV<br/>per-provider state)]
     Worker -->|Claude OAuth token| Anthropic[Anthropic API]
-    Worker -->|HTTPS + shared secret| Fly[ai-quota-openai<br/>Fly.io Machine]
+    Worker -->|HTTPS + shared secret| Fly[your-fly-app<br/>Fly.io Machine]
     Fly --> Volume[(Encrypted Fly volume<br/>Codex auth + idempotency)]
     Fly -->|codex app-server| Limits[ChatGPT/Codex<br/>rate limits]
     Fly -->|codex exec, when due| Codex[ChatGPT/Codex]
@@ -91,8 +93,8 @@ uses the IANA timezone on each run so daylight-saving changes are automatic.
 | [`worker/`](worker/) | Ten-minute cron, schedule and reset gating, direct Anthropic call, protected Fly call, structured logs | Separate Claude and OpenAI reset state in Workers KV |
 | [`openai-runner/`](openai-runner/) | Authenticated HTTP endpoint, live Codex limit query, `codex exec`, duplicate suppression | Codex `auth.json` and idempotency ledger on an encrypted Fly volume |
 
-The deployed Cloudflare Worker is named `ai-quota-warmup`; the example Fly app
-is named `ai-quota-openai`.
+The deployed Cloudflare Worker is named `ai-quota-warmup`; replace `your-fly-app`
+below with the name of your Fly app.
 
 ## Configuration
 
@@ -104,7 +106,7 @@ crons = ["*/10 * * * *"]
 
 [vars]
 WARMUP_PROVIDERS = "claude,openai"
-GPT_WARMUP_URL = "https://ai-quota-openai.fly.dev/warmup"
+GPT_WARMUP_URL = "https://your-fly-app.fly.dev/warmup"
 TARGETS_LOCAL = "06:00,11:00,16:00,21:00"
 TARGET_TIMEZONE = "Europe/Dublin"
 CATCHUP_HORIZON_MINUTES = "240"
@@ -134,7 +136,7 @@ No `OPENAI_API_KEY` is required for the OpenAI path.
 After deployment, verify Fly first:
 
 ```bash
-curl https://ai-quota-openai.fly.dev/health
+curl https://your-fly-app.fly.dev/health
 # {"ok":true,"authenticated":true}
 ```
 
