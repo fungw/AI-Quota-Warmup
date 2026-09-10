@@ -11,84 +11,171 @@ import {
 } from "./anthropic";
 import { emit } from "./log";
 
-export const OPENAI_API_URL = "https://api.openai.com/v1/responses";
-export const DEFAULT_GPT_MODEL = "gpt-5.2";
+export const DEFAULT_GPT_MODEL = "codex-subscription-default";
 export const DEFAULT_GPT_WARMUP_MESSAGE = "Reply with exactly: Warmed up!";
+export const GPT_RUNNER_TIMEOUT_MS = Math.max(ATTEMPT_TIMEOUT_MS, 90_000);
 
 const realSleep: SleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+export interface CodexRateWindow {
+    usedPercent: number | null;
+    windowDurationMins: number | null;
+    resetsAt: number | null;
+}
+
+export interface CodexRateLimits {
+    limitId: string | null;
+    planType: string | null;
+    primary: CodexRateWindow | null;
+    secondary: CodexRateWindow | null;
+}
+
+export interface GptRunnerResponse {
+    success: boolean;
+    action: "pinged" | "skipped";
+    reason?: "window-still-open";
+    reply?: string;
+    nextResetAt?: number | null;
+    rateLimits?: CodexRateLimits | null;
+    error?: string;
+}
 
 function pickHeaders(res: Response): Record<string, string> {
     const out: Record<string, string> = {};
     res.headers.forEach((value, name) => {
-        if (name.startsWith("x-ratelimit-") || name === "x-request-id" || name === "retry-after") out[name] = value;
+        if (name === "fly-request-id" || name === "retry-after" || name === "x-request-id") out[name] = value;
     });
     return out;
 }
 
-function outputText(data: { output_text?: unknown; output?: Array<{ content?: Array<{ type?: string; text?: string }> }> }): string {
-    if (typeof data.output_text === "string") return data.output_text;
-    return data.output?.flatMap((item) => item.content ?? []).find((item) => item.type === "output_text")?.text ?? "(no text output)";
+function isRunnerResponse(value: unknown): value is GptRunnerResponse {
+    if (!value || typeof value !== "object") return false;
+    const candidate = value as Partial<GptRunnerResponse>;
+    return candidate.success === true && (candidate.action === "pinged" || candidate.action === "skipped");
 }
 
 export async function attemptGptWarmup(
-    env: Env, message: string, attempt: number, verbose: boolean, fetchImpl: FetchImpl = fetch
-): Promise<{ log: AttemptLog; reply?: string }> {
+    env: Env,
+    message: string,
+    idempotencyKey: string,
+    force: boolean,
+    attempt: number,
+    verbose: boolean,
+    fetchImpl: FetchImpl = fetch,
+): Promise<{ log: AttemptLog; runner?: GptRunnerResponse }> {
     const startedAt = new Date();
     const t0 = Date.now();
-    const model = env.GPT_MODEL || DEFAULT_GPT_MODEL;
-    if (verbose) emit("attempt.start", { attempt, url: OPENAI_API_URL, model, messageChars: message.length });
+    const url = env.GPT_WARMUP_URL ?? "";
+    if (verbose) emit("attempt.start", { attempt, url, model: DEFAULT_GPT_MODEL, messageChars: message.length });
+
     try {
-        const response = await fetchImpl(OPENAI_API_URL, {
+        const response = await fetchImpl(url, {
             method: "POST",
-            headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, "Content-Type": "application/json" },
-            body: JSON.stringify({ model, input: message, max_output_tokens: 64, store: false }),
-            signal: AbortSignal.timeout(ATTEMPT_TIMEOUT_MS),
+            headers: {
+                Authorization: `Bearer ${env.GPT_WARMUP_SECRET}`,
+                "Content-Type": "application/json",
+                "Idempotency-Key": idempotencyKey,
+            },
+            body: JSON.stringify({ message, targetSlot: idempotencyKey, force }),
+            signal: AbortSignal.timeout(GPT_RUNNER_TIMEOUT_MS),
         });
         const headers = pickHeaders(response);
+        const raw = await response.text();
+
         if (!response.ok) {
-            const log: AttemptLog = { attempt, startedAt: startedAt.toISOString(), durationMs: Date.now() - t0,
-                status: response.status, statusText: response.statusText, ok: false, headers, errorBody: truncate(await response.text()) };
+            const log: AttemptLog = {
+                attempt,
+                startedAt: startedAt.toISOString(),
+                durationMs: Date.now() - t0,
+                status: response.status,
+                statusText: response.statusText,
+                ok: false,
+                headers,
+                errorBody: truncate(raw),
+            };
             emit("attempt.failed", log);
             return { log };
         }
-        const data = (await response.json()) as { output_text?: unknown; output?: Array<{ content?: Array<{ type?: string; text?: string }> }>; usage?: unknown };
-        const log: AttemptLog = { attempt, startedAt: startedAt.toISOString(), durationMs: Date.now() - t0,
-            status: response.status, statusText: response.statusText, ok: true, headers, usage: data.usage };
-        const reply = outputText(data);
-        if (verbose) emit("attempt.ok", { ...log, reply });
-        return { log, reply };
+
+        let data: unknown;
+        try {
+            data = JSON.parse(raw);
+        } catch {
+            data = null;
+        }
+        if (!isRunnerResponse(data)) {
+            const log: AttemptLog = {
+                attempt,
+                startedAt: startedAt.toISOString(),
+                durationMs: Date.now() - t0,
+                status: response.status,
+                statusText: response.statusText,
+                ok: false,
+                headers,
+                errorBody: truncate(`Invalid Fly runner response: ${raw}`),
+            };
+            emit("attempt.failed", log);
+            return { log };
+        }
+
+        const log: AttemptLog = {
+            attempt,
+            startedAt: startedAt.toISOString(),
+            durationMs: Date.now() - t0,
+            status: response.status,
+            statusText: response.statusText,
+            ok: true,
+            headers,
+            usage: data.rateLimits,
+        };
+        if (verbose) emit("attempt.ok", { ...log, action: data.action, reply: data.reply });
+        return { log, runner: data };
     } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
-        const log: AttemptLog = { attempt, startedAt: startedAt.toISOString(), durationMs: Date.now() - t0, ok: false,
-            error: { name: error.name, message: error.message } };
+        const log: AttemptLog = {
+            attempt,
+            startedAt: startedAt.toISOString(),
+            durationMs: Date.now() - t0,
+            ok: false,
+            error: { name: error.name, message: error.message },
+        };
         emit("attempt.error", log);
         return { log };
     }
 }
 
-export async function pingGpt(env: Env, verbose: boolean, deps: { fetchImpl?: FetchImpl; sleep?: SleepImpl } = {}) {
+export async function pingGpt(
+    env: Env,
+    verbose: boolean,
+    options: { idempotencyKey: string; force: boolean },
+    deps: { fetchImpl?: FetchImpl; sleep?: SleepImpl } = {},
+) {
     const fetchImpl = deps.fetchImpl ?? fetch;
     const sleep = deps.sleep ?? realSleep;
     const message = env.WARMUP_MESSAGE || DEFAULT_GPT_WARMUP_MESSAGE;
     const attempts: AttemptLog[] = [];
+
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-        const { log, reply } = await attemptGptWarmup(env, message, attempt, verbose, fetchImpl);
+        const { log, runner } = await attemptGptWarmup(
+            env,
+            message,
+            options.idempotencyKey,
+            options.force,
+            attempt,
+            verbose,
+            fetchImpl,
+        );
         attempts.push(log);
-        // attemptGptWarmup always supplies headers for a successful HTTP response.
-        if (log.ok) return { success: true as const, attempts, reply, headers: log.headers! };
+        if (log.ok && runner) return { ...runner, attempts };
         if (!isRetryable(log.status) || attempt === MAX_ATTEMPTS) {
             if (log.errorBody) return { success: false as const, attempts, error: log.errorBody };
-            /* istanbul ignore else -- failed attempts always carry an Error when no HTTP body exists. */
             if (log.error) return { success: false as const, attempts, error: log.error.message };
-            /* istanbul ignore next -- failed attempts always have errorBody or error. */
-            return {
-                success: false as const,
-                attempts,
-                error: `HTTP ${log.status ?? "?"}`,
-            };
+            return { success: false as const, attempts, error: `HTTP ${log.status ?? "?"}` };
         }
         const retryAfter = Number(log.headers?.["retry-after"]);
-        const requestedMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 1000 * 2 ** (attempt - 1);
+        const requestedMs = Number.isFinite(retryAfter) && retryAfter > 0
+            ? retryAfter * 1000
+            : 1000 * 2 ** (attempt - 1);
         const backoffMs = Math.min(requestedMs, MAX_BACKOFF_MS);
         emit("attempt.retrying", { attempt, backoffMs, requestedMs });
         await sleep(backoffMs);

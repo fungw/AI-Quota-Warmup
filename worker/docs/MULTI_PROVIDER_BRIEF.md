@@ -17,7 +17,8 @@ deprecated compatibility alias only if it can be done without ambiguity.
 Each enabled provider needs only its own credential:
 
 - `claude` uses `CLAUDE_CODE_OAUTH_TOKEN`.
-- `openai` uses `OPENAI_API_KEY` and may use `GPT_MODEL`.
+- `openai` uses `GPT_WARMUP_URL` plus `GPT_WARMUP_SECRET` to invoke the
+  subscription-authenticated Fly.io Codex runner.
 
 ## Isolation and scheduling
 

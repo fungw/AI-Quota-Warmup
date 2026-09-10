@@ -3,7 +3,7 @@ import { resolveConfig } from "./config";
 import { currentTarget } from "./schedule";
 import { readState, writeState, type State } from "./state";
 import { ANTHROPIC_API_URL, MODEL, resetFromHeaders, ping, type PingDeps } from "./anthropic";
-import { DEFAULT_GPT_MODEL, OPENAI_API_URL, pingGpt } from "./openai";
+import { DEFAULT_GPT_MODEL, pingGpt } from "./openai";
 import { emit, fingerprint } from "./log";
 
 export type SkipReason = "no-target" | "already-served" | "window-still-open";
@@ -49,7 +49,7 @@ export type ProviderReport = ClockBase & {
     error?: string;
     newResetAt?: string | null;
     newResetSource?: string | null;
-    rateLimit?: Record<string, string>;
+    rateLimit?: unknown;
 };
 
 type AggregateReport = ClockBase & {
@@ -60,11 +60,17 @@ type AggregateReport = ClockBase & {
 
 function providerSettings(env: Env, provider: WarmupProvider) {
     const isOpenAi = provider === "openai";
+    const apiUrl = isOpenAi ? env.GPT_WARMUP_URL ?? "" : ANTHROPIC_API_URL;
+    const token = isOpenAi ? env.GPT_WARMUP_SECRET : env.CLAUDE_CODE_OAUTH_TOKEN;
     return {
-        apiUrl: isOpenAi ? OPENAI_API_URL : ANTHROPIC_API_URL,
-        model: isOpenAi ? env.GPT_MODEL || DEFAULT_GPT_MODEL : MODEL,
-        token: isOpenAi ? env.OPENAI_API_KEY : env.CLAUDE_CODE_OAUTH_TOKEN,
-        missingSecret: isOpenAi ? "OPENAI_API_KEY" : "CLAUDE_CODE_OAUTH_TOKEN",
+        apiUrl,
+        model: isOpenAi ? DEFAULT_GPT_MODEL : MODEL,
+        token,
+        configError: isOpenAi && !apiUrl
+            ? "GPT_WARMUP_URL is not set. Set it in `wrangler.toml`."
+            : !token
+                ? `${isOpenAi ? "GPT_WARMUP_SECRET" : "CLAUDE_CODE_OAUTH_TOKEN"} is not set. Run \`wrangler secret put ${isOpenAi ? "GPT_WARMUP_SECRET" : "CLAUDE_CODE_OAUTH_TOKEN"}\`.`
+                : null,
     };
 }
 
@@ -100,9 +106,9 @@ async function runProvider(
     };
 
     if (!opts.force && state.firedTarget === target?.toISOString()) return skip("already-served");
-    // Only Claude has a documented five-hour session boundary. OpenAI's
-    // request/token buckets must not be mistaken for one.
-    if (!opts.force && provider === "claude" && state.nextResetAt !== null && started.getTime() < state.nextResetAt) {
+    // Claude reports its reset directly; the Fly Codex runner obtains the
+    // corresponding ChatGPT/Codex boundary from app-server's rate-limit API.
+    if (!opts.force && state.nextResetAt !== null && started.getTime() < state.nextResetAt) {
         return skip("window-still-open");
     }
 
@@ -114,7 +120,7 @@ async function runProvider(
     };
     emit("run.start", { ...reportBase, ...settingsForLog });
 
-    if (!settings.token) {
+    if (settings.configError) {
         const finished = now();
         await writeState(env, {
             ...state,
@@ -126,25 +132,87 @@ async function runProvider(
             ...settingsForLog,
             action: "pinged",
             success: false,
-            error: `${settings.missingSecret} is not set. Run \`wrangler secret put ${settings.missingSecret}\`.`,
+            error: settings.configError,
         };
         emit("run.failure", report);
         return report;
     }
 
-    const result = provider === "openai" ? await pingGpt(env, verbose, deps) : await ping(env, verbose, deps);
-    const finished = now();
-    const reset = result.success
-        ? provider === "openai"
-            ? null
-            : resetFromHeaders(result.headers, finished.getTime())
-        : null;
+    let finished: Date;
+    let result: {
+        success: boolean;
+        attempts: unknown[];
+        reply?: string;
+        error?: string;
+        reset: { at: number; source: string } | null;
+        rateLimit?: unknown;
+    };
+    if (provider === "openai") {
+        const openaiResult = await pingGpt(
+            env,
+            verbose,
+            { idempotencyKey: target?.toISOString() ?? base.runId, force: Boolean(opts.force) },
+            deps,
+        );
+        finished = now();
+        if (openaiResult.success && openaiResult.action === "skipped") {
+            const nextResetAt = openaiResult.nextResetAt ?? state.nextResetAt;
+            await writeState(
+                env,
+                {
+                    ...state,
+                    nextResetAt,
+                    lastPingAt: finished.toISOString(),
+                    lastOutcome: "success",
+                } satisfies State,
+                provider,
+            );
+            const report: ProviderReport = {
+                ...reportBase,
+                ...settingsForLog,
+                action: "skipped",
+                reason: "window-still-open",
+                success: true,
+                finishedAt: finished.toISOString(),
+                totalMs: finished.getTime() - started.getTime(),
+                attempts: openaiResult.attempts,
+                newResetAt: nextResetAt === null ? null : new Date(nextResetAt).toISOString(),
+                newResetSource: "runner:codex-rate-limits",
+                rateLimit: openaiResult.rateLimits,
+            };
+            emit("run.skipped", report);
+            return report;
+        }
+        result = {
+            success: openaiResult.success,
+            attempts: openaiResult.attempts,
+            reply: openaiResult.success ? openaiResult.reply : undefined,
+            error: openaiResult.success ? undefined : openaiResult.error,
+            reset: openaiResult.success && openaiResult.nextResetAt
+                ? { at: openaiResult.nextResetAt, source: "runner:codex-rate-limits" }
+                : null,
+            rateLimit: openaiResult.success ? openaiResult.rateLimits : undefined,
+        };
+    } else {
+        const anthropicResult = await ping(env, verbose, deps);
+        finished = now();
+        result = {
+            success: anthropicResult.success,
+            attempts: anthropicResult.attempts,
+            reply: anthropicResult.success ? anthropicResult.reply : undefined,
+            error: anthropicResult.success ? undefined : anthropicResult.error,
+            reset: anthropicResult.success
+                ? resetFromHeaders(anthropicResult.headers, finished.getTime())
+                : null,
+            rateLimit: anthropicResult.success ? anthropicResult.headers : undefined,
+        };
+    }
 
     if (result.success) {
         await writeState(
             env,
             {
-                nextResetAt: reset?.at ?? null,
+                nextResetAt: result.reset?.at ?? null,
                 firedTarget: target?.toISOString() ?? state.firedTarget,
                 lastPingAt: finished.toISOString(),
                 lastOutcome: "success",
@@ -169,9 +237,9 @@ async function runProvider(
         attempts: result.attempts,
         reply: result.success ? result.reply : undefined,
         error: result.success ? undefined : result.error,
-        newResetAt: reset ? new Date(reset.at).toISOString() : null,
-        newResetSource: reset?.source ?? (provider === "openai" && result.success ? "provider:no-session-window" : null),
-        rateLimit: result.success ? result.headers : undefined,
+        newResetAt: result.reset ? new Date(result.reset.at).toISOString() : null,
+        newResetSource: result.reset?.source ?? (provider === "openai" && result.success ? "runner:no-reset-reported" : null),
+        rateLimit: result.rateLimit,
     };
     emit(result.success ? "run.success" : "run.failure", report);
     return report;

@@ -1,4 +1,4 @@
-# AI-Quote-Warmup Worker
+# AI-Quota-Warmup Worker
 
 Cloudflare Worker that warms configured AI-provider quotas at predictable times
 of day. Claude Code's 5-hour rate-limit window is gated from its reset header;
@@ -6,7 +6,7 @@ OpenAI is tracked independently from the same cron tick.
 
 ## Providers
 
-AI-Quote-Warmup currently supports **Claude** and **OpenAI** only. Other AI
+AI-Quota-Warmup currently supports **Claude** and **OpenAI** only. Other AI
 providers are not supported yet.
 
 `WARMUP_PROVIDERS` is a comma-separated list of providers to run on each due
@@ -15,23 +15,23 @@ target. It defaults to `claude` for existing deployments:
 | Value | Credential | Behaviour |
 |---|---|---|
 | `claude` (default) | `CLAUDE_CODE_OAUTH_TOKEN` | Preserves the original Claude Code 5-hour-window logic. |
-| `openai` | `OPENAI_API_KEY` | Sends a Responses API request at each target slot. OpenAI API rate limits are request/token buckets, not a documented Claude-style 5-hour session window, so the Worker does **not** fabricate or gate on a five-hour reset. |
+| `openai` | `GPT_WARMUP_SECRET` | Calls the protected Fly.io Codex runner, which uses ChatGPT-managed authentication and reports the real Codex window. |
 
 For both subscriptions, set `WARMUP_PROVIDERS = "claude,openai"`. Each provider
 has independent KV state and credentials, so a missing or failed credential
 does not stop the other provider. `WARMUP_PROVIDER` remains a deprecated
 single-provider compatibility alias.
 
-The OpenAI integration uses `POST /v1/responses`, Bearer API-key authentication,
-`store: false`, and defaults to `gpt-5.2`. Override the model with `GPT_MODEL`
-when needed. This affects OpenAI Platform API usage and billing; it does not
-warm or reset limits for the ChatGPT website/app subscription.
+The OpenAI integration does not use the Platform Responses API. The Worker
+calls [`../openai-runner/`](../openai-runner/), where the official Codex CLI is
+authenticated through ChatGPT Plus and obtains the real reset boundary from
+Codex app-server's `account/rateLimits/read` method.
 
-To add GPT:
+To connect the deployed Fly runner:
 
 ```bash
-pnpm wrangler secret put OPENAI_API_KEY
-# Set WARMUP_PROVIDERS = "claude,openai" (or "openai") in wrangler.toml.
+pnpm wrangler secret put GPT_WARMUP_SECRET
+# Set GPT_WARMUP_URL to https://<fly-app>.fly.dev/warmup.
 pnpm run deploy
 ```
 
@@ -102,18 +102,17 @@ with a deliberate ~9h gap overnight, in exchange for boundaries that stay put.
    ```
 
 6. **Add OpenAI** (required when `openai` is included in
-   `WARMUP_PROVIDERS`). Create an API key at
-   [platform.openai.com/api-keys](https://platform.openai.com/api-keys), then
-   store it as a Worker secret:
+   `WARMUP_PROVIDERS`). Deploy and authenticate the service in
+   [`../openai-runner/`](../openai-runner/), then store the same generated
+   bearer secret on Fly as `WARMUP_SHARED_SECRET` and on the Worker as:
 
    ```bash
-   pnpm wrangler secret put OPENAI_API_KEY
+   pnpm wrangler secret put GPT_WARMUP_SECRET
    ```
 
-   In `wrangler.toml`, set `WARMUP_PROVIDERS = "claude,openai"` to enable both
-   providers, or `WARMUP_PROVIDERS = "openai"` for OpenAI only. OpenAI API usage
-   requires OpenAI Platform billing/credits and is separate from a ChatGPT
-   subscription.
+   Set `GPT_WARMUP_URL` in `wrangler.toml` to the Fly `/warmup` endpoint. Set
+   `WARMUP_PROVIDERS = "claude,openai"` to enable both providers, or
+   `WARMUP_PROVIDERS = "openai"` for OpenAI only.
 
 7. **Create the KV namespace** the Worker uses to remember window state:
 
@@ -147,7 +146,7 @@ pnpm run typecheck     # src/ and test/ separately, since they use different typ
 Tests run inside the real Workers runtime via `@cloudflare/vitest-pool-workers`
 (so `Intl`-based DST arithmetic and KV behave exactly as in production), against
 `wrangler.test.toml` — a test-only config, never used for `wrangler deploy`.
-No test ever makes a real call to `api.anthropic.com`: a global `fetch` guard in
+No test ever makes a real provider or Fly call: a global `fetch` guard in
 `test/setup.ts` throws if one slips through, and the retry/ping logic is
 exercised via injected `fetchImpl`/`sleep`/`now` seams instead. See
 [`docs/TEST_PLAN.md`](docs/TEST_PLAN.md) for the full case matrix and rationale.
@@ -201,7 +200,7 @@ One JSON line per event. The `run.success` / `run.failure` summary carries:
 | `startedAt` | When the Worker **actually** ran |
 | `driftMs` | The gap between those two measured |
 | `finishedAt` / `totalMs` | Wall-clock cost of the whole run |
-| `url` / `model` | Exactly what was hit |
+| `url` / `model` | Exactly what was hit; OpenAI reports the Fly URL and subscription-default Codex model |
 | `provider` | The provider for each per-provider event/result |
 | `tokenFingerprint` | `len=… …abcd`, to confirm *which* token is deployed |
 | `attempts[]` | Per-try status, duration, and error body |
@@ -210,8 +209,8 @@ One JSON line per event. The `run.success` / `run.failure` summary carries:
 | `reply` | What Claude actually said |
 | `targetSlot` / `minutesSinceTarget` | Which slot this tick was serving, and how late |
 | `knownResetAt` / `minutesUntilReset` | The window boundary the Worker is gating on |
-| `newResetAt` / `newResetSource` | Boundary after the ping; `header` or `fallback:+5h` |
-| `rateLimit` | Full `anthropic-ratelimit-*` set, incl. 5h/7d utilization |
+| `newResetAt` / `newResetSource` | Boundary after the ping and whether it came from Anthropic headers or Codex app-server |
+| `rateLimit` | Provider rate-limit details, including Codex's primary and secondary windows |
 | `reason` (on `run.skipped`) | `no-target`, `already-served`, `window-still-open` |
 
 With multiple providers, `/run` returns `action: "aggregate"` and a `results`

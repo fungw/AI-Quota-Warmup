@@ -14,10 +14,10 @@ export interface Env {
     WARMUP_PROVIDERS?: string;
     /** Deprecated compatibility alias for a single provider. */
     WARMUP_PROVIDER?: string;
-    /** OpenAI Platform API key, required when WARMUP_PROVIDERS includes `openai`. */
-    OPENAI_API_KEY?: string;
-    /** Optional Responses API model override when using the OpenAI provider. */
-    GPT_MODEL?: string;
+    /** HTTPS endpoint for the subscription-authenticated Codex runner on Fly.io. */
+    GPT_WARMUP_URL?: string;
+    /** Shared bearer secret for Worker -> Fly runner authentication. */
+    GPT_WARMUP_SECRET?: string;
     WARMUP_MESSAGE?: string;
     /** Comma-separated local wall-clock times, e.g. "06:00,11:00,16:00,21:00". */
     TARGETS_LOCAL?: string;
