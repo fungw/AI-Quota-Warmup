@@ -2,6 +2,7 @@ import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { tick } from "../src/tick";
 import { STATE_KEY, stateKey, writeState, type State } from "../src/state";
+import { MIN_ANCHORED_WINDOW_MS } from "../src/anthropic";
 import { jsonResponse, makeEnv, fixedNow, textResponse } from "./helpers";
 
 const TZ_ENV = { TARGET_TIMEZONE: "UTC", TARGETS_LOCAL: "06:00", CATCHUP_HORIZON_MINUTES: "240" };
@@ -564,5 +565,158 @@ describe("tick gating", () => {
         const duplicate = await tick(testEnv, { trigger: "manual", cron: null, scheduledTime: null }, { now, fetchImpl });
         expect(calls).toBe(2);
         expect((duplicate as { results: Array<{ reason: string }> }).results.map((r) => r.reason)).toEqual(["already-served", "already-served"]);
+    });
+});
+
+describe("claude window anchoring", () => {
+    const MANUAL = { trigger: "manual" as const, cron: null, scheduledTime: null };
+    const TARGET_06_ISO = new Date(TARGET_06).toISOString();
+
+    /** A successful Claude reply carrying `resetAtMs` as the unified 5h reset header. */
+    const claudeReply = (resetAtMs: number) =>
+        jsonResponse(
+            { content: [{ type: "text", text: "ok" }] },
+            { headers: { "anthropic-ratelimit-unified-5h-reset": String(resetAtMs / 1000) } },
+        );
+
+    const claudeEnv = () => makeEnv({ WARMUP_STATE: env.WARMUP_STATE, ...TZ_ENV });
+    const storedClaude = () => env.WARMUP_STATE.get<State>(STATE_KEY, "json");
+
+    beforeEach(async () => {
+        await env.WARMUP_STATE.delete(STATE_KEY);
+        await env.WARMUP_STATE.delete(stateKey("openai"));
+    });
+
+    it("does not retire the slot when a ping joins a window it did not open", async () => {
+        const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+        // The 18 Sep sequence: fired at the target, reset 9m30s away because a
+        // background daemon had opened the window hours earlier.
+        const reset = TARGET_06 + 9 * 60_000 + 30_000;
+        const report = await tick(claudeEnv(), MANUAL, {
+            now: fixedNow(TARGET_06_ISO),
+            fetchImpl: () => Promise.resolve(claudeReply(reset)),
+        });
+        const events = spy.mock.calls.map((call) => JSON.parse(String(call[0])).event);
+        spy.mockRestore();
+
+        expect(report).toMatchObject({
+            action: "pinged",
+            success: true,
+            boughtWindowMs: 9 * 60_000 + 30_000,
+            anchoredWindow: false,
+            newResetAt: new Date(reset).toISOString(),
+        });
+        expect(events).toContain("run.window-joined");
+        expect(events).not.toContain("run.success");
+        expect(await storedClaude()).toMatchObject({
+            nextResetAt: reset,
+            firedTarget: null,
+            lastOutcome: "success",
+        });
+    });
+
+    it("retries the same slot after the joined window's reset and retires it on a real anchor", async () => {
+        let clock = new Date(TARGET_06);
+        const retryAt = TARGET_06 + 11 * 60_000;
+        const anchorReset = retryAt + 5 * 60 * 60 * 1000;
+        let calls = 0;
+        const fetchImpl = () => {
+            calls++;
+            return Promise.resolve(claudeReply(calls === 1 ? TARGET_06 + 10 * 60_000 : anchorReset));
+        };
+        const testEnv = claudeEnv();
+        const deps = { now: () => clock, fetchImpl };
+
+        await tick(testEnv, MANUAL, deps);
+        expect((await storedClaude())?.firedTarget).toBeNull();
+
+        // Same 06:00 slot, still inside the 240-minute horizon, now past the
+        // reset the joined window reported.
+        clock = new Date(retryAt);
+        const retry = await tick(testEnv, MANUAL, deps);
+
+        expect(calls).toBe(2);
+        expect(retry).toMatchObject({ action: "pinged", success: true, anchoredWindow: true });
+        expect(await storedClaude()).toMatchObject({ nextResetAt: anchorReset, firedTarget: TARGET_06_ISO });
+    });
+
+    it("retires the slot when a ping buys a full window", async () => {
+        // The healthy 10 Sep run: 4h59m35s bought, the ten-minute rounding and
+        // request latency being the only shortfall.
+        const reset = TARGET_06 + 5 * 60 * 60 * 1000 - 25_000;
+        const report = await tick(claudeEnv(), MANUAL, {
+            now: fixedNow(TARGET_06_ISO),
+            fetchImpl: () => Promise.resolve(claudeReply(reset)),
+        });
+        expect(report).toMatchObject({ action: "pinged", success: true, anchoredWindow: true });
+        expect(await storedClaude()).toMatchObject({ nextResetAt: reset, firedTarget: TARGET_06_ISO });
+    });
+
+    it("anchors on exactly the threshold", async () => {
+        const reset = TARGET_06 + MIN_ANCHORED_WINDOW_MS;
+        const report = await tick(claudeEnv(), MANUAL, {
+            now: fixedNow(TARGET_06_ISO),
+            fetchImpl: () => Promise.resolve(claudeReply(reset)),
+        });
+        expect(report).toMatchObject({ boughtWindowMs: MIN_ANCHORED_WINDOW_MS, anchoredWindow: true });
+        expect((await storedClaude())?.firedTarget).toBe(TARGET_06_ISO);
+    });
+
+    it("does not anchor one millisecond below the threshold", async () => {
+        // The header only carries whole seconds, so the sub-second side of the
+        // boundary is exercised by moving the clock rather than the reset.
+        const reset = TARGET_06 + MIN_ANCHORED_WINDOW_MS;
+        const report = await tick(claudeEnv(), MANUAL, {
+            now: fixedNow(new Date(TARGET_06 + 1).toISOString()),
+            fetchImpl: () => Promise.resolve(claudeReply(reset)),
+        });
+        expect(report).toMatchObject({ boughtWindowMs: MIN_ANCHORED_WINDOW_MS - 1, anchoredWindow: false });
+        expect((await storedClaude())?.firedTarget).toBeNull();
+    });
+
+    it("gives up on a slot whose joined window outlasts the catch-up horizon", async () => {
+        let clock = new Date(TARGET_06);
+        // 10:15, fifteen minutes past the 240-minute horizon for the 06:00 slot.
+        const reset = TARGET_06 + 4 * 60 * 60 * 1000 + 15 * 60_000;
+        let calls = 0;
+        const fetchImpl = () => {
+            calls++;
+            return Promise.resolve(claudeReply(reset));
+        };
+        const testEnv = claudeEnv();
+        const deps = { now: () => clock, fetchImpl };
+
+        await tick(testEnv, MANUAL, deps);
+
+        clock = new Date(TARGET_06 + 239 * 60_000);
+        expect(await tick(testEnv, MANUAL, deps)).toMatchObject({
+            action: "skipped",
+            reason: "window-still-open",
+        });
+
+        clock = new Date(TARGET_06 + 260 * 60_000);
+        expect(await tick(testEnv, MANUAL, deps)).toMatchObject({ action: "skipped", reason: "no-target" });
+
+        expect(calls).toBe(1);
+        expect((await storedClaude())?.firedTarget).toBeNull();
+    });
+
+    it("leaves OpenAI alone: a short runner window still retires the slot", async () => {
+        const testEnv = makeEnv({
+            WARMUP_STATE: env.WARMUP_STATE,
+            ...TZ_ENV,
+            ...RUNNER_ENV,
+            WARMUP_PROVIDER: "openai",
+        });
+        const report = await tick(testEnv, MANUAL, {
+            now: fixedNow(TARGET_06_ISO),
+            fetchImpl: () => Promise.resolve(jsonResponse(runnerResponse({ nextResetAt: TARGET_06 + 9 * 60_000 }))),
+        });
+        expect(report).toMatchObject({ action: "pinged", success: true });
+        expect(report).not.toHaveProperty("anchoredWindow");
+        expect(await env.WARMUP_STATE.get<State>(stateKey("openai"), "json")).toMatchObject({
+            nextResetAt: TARGET_06 + 9 * 60_000,
+            firedTarget: TARGET_06_ISO,
+        });
     });
 });

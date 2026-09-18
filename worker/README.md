@@ -55,6 +55,10 @@ The reset time is read from `anthropic-ratelimit-unified-5h-reset` on every
 response, so the schedule re-anchors to the real boundary on each ping instead
 of extrapolating. A late trigger costs minutes, not a window.
 
+That header also reveals the wasted case above: if a ping bought less than
+4h45m it landed inside a window something else opened, so the Worker stores the
+reset but leaves the slot unserved and retries once that reset passes.
+
 There is no cheap way to *check* the window: reading the header requires a
 request, and a request opens a window if none is open. Hence the KV state — the
 Worker remembers rather than polls. Skipped ticks cost one KV read and no API
@@ -191,7 +195,8 @@ exposes your target times and window state to anyone who guesses the URL.
 
 ## What gets logged
 
-One JSON line per event. The `run.success` / `run.failure` summary carries:
+One JSON line per event. The `run.success` / `run.window-joined` /
+`run.failure` summary carries:
 
 | Field | Why it's there |
 |---|---|
@@ -211,6 +216,7 @@ One JSON line per event. The `run.success` / `run.failure` summary carries:
 | `knownResetAt` / `minutesUntilReset` | The window boundary the Worker is gating on |
 | `newResetAt` / `newResetSource` | Boundary after the ping and whether it came from Anthropic headers or Codex app-server |
 | `rateLimit` | Provider rate-limit details, including Codex's primary and secondary windows |
+| `boughtWindowMs` / `anchoredWindow` (Claude) | How much window the ping bought, and whether that was enough to count as opening one |
 | `reason` (on `run.skipped`) | `no-target`, `already-served`, `window-still-open` |
 
 With multiple providers, `/run` returns `action: "aggregate"` and a `results`
@@ -229,6 +235,9 @@ event = "run.skipped" AND reason = "window-still-open"
                                       # have wasted this slot
 minutesSinceTarget > 30               # slots being served late
 newResetSource = "fallback:+5h"       # the reset header stopped being sent
+event = "run.window-joined"           # the ping succeeded but only joined
+                                      # someone else's window; the slot was left
+                                      # unserved for a later tick
 ```
 
 Watch `rateLimit["anthropic-ratelimit-unified-7d-utilization"]` too — it's how

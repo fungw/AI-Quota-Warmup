@@ -2,7 +2,14 @@ import type { Env, WarmupProvider } from "./config";
 import { resolveConfig } from "./config";
 import { currentTarget } from "./schedule";
 import { readState, writeState, type State } from "./state";
-import { ANTHROPIC_API_URL, MODEL, resetFromHeaders, ping, type PingDeps } from "./anthropic";
+import {
+    ANTHROPIC_API_URL,
+    MIN_ANCHORED_WINDOW_MS,
+    MODEL,
+    resetFromHeaders,
+    ping,
+    type PingDeps,
+} from "./anthropic";
 import { DEFAULT_GPT_MODEL, pingGpt } from "./openai";
 import { emit, fingerprint } from "./log";
 
@@ -49,6 +56,10 @@ export type ProviderReport = ClockBase & {
     error?: string;
     newResetAt?: string | null;
     newResetSource?: string | null;
+    /** Claude only: how much window the ping bought, so logs need no arithmetic. */
+    boughtWindowMs?: number | null;
+    /** Claude only: false when the ping joined a window it did not open. */
+    anchoredWindow?: boolean;
     rateLimit?: unknown;
 };
 
@@ -208,12 +219,34 @@ async function runProvider(
         };
     }
 
+    /**
+     * Bug fix: a Claude ping only *opens* a five-hour window when it is the
+     * first request after the previous one closed. A ping that lands inside a
+     * window something else already opened — Claude Code's background daemon
+     * claims a prewarm worker in the small hours — still succeeds, and reports
+     * that window's existing reset, which can be minutes away. Recording it as
+     * a served target retires the slot permanently, so the day's first warm-up
+     * is spent for nothing and never retried; that is how the 06:00 slot was
+     * lost on several nights. The reset is authoritative either way and is
+     * always stored, but the target is retired only when the ping actually
+     * bought a window. Leaving `firedTarget` alone lets the first tick after
+     * the stored reset passes ping again and open a real window, bounded by the
+     * existing catch-up horizon.
+     *
+     * Claude only: the Fly Codex runner reads the live limit before spending
+     * anything and reports its own join case through the `skipped` branch
+     * above, which already writes the reset without touching `firedTarget`.
+     */
+    const boughtWindowMs = result.reset === null ? null : result.reset.at - finished.getTime();
+    const anchoredWindow = boughtWindowMs !== null && boughtWindowMs >= MIN_ANCHORED_WINDOW_MS;
+    const joinedOpenWindow = provider === "claude" && result.success && !anchoredWindow;
+
     if (result.success) {
         await writeState(
             env,
             {
                 nextResetAt: result.reset?.at ?? null,
-                firedTarget: target?.toISOString() ?? state.firedTarget,
+                firedTarget: joinedOpenWindow ? state.firedTarget : target?.toISOString() ?? state.firedTarget,
                 lastPingAt: finished.toISOString(),
                 lastOutcome: "success",
             } satisfies State,
@@ -239,9 +272,14 @@ async function runProvider(
         error: result.success ? undefined : result.error,
         newResetAt: result.reset ? new Date(result.reset.at).toISOString() : null,
         newResetSource: result.reset?.source ?? (provider === "openai" && result.success ? "runner:no-reset-reported" : null),
+        ...(provider === "claude" && result.success ? { boughtWindowMs, anchoredWindow } : {}),
         rateLimit: result.rateLimit,
     };
-    emit(result.success ? "run.success" : "run.failure", report);
+    // A join is a success that achieved nothing, so it gets its own event
+    // rather than hiding inside `run.success`: someone reading logs after a bad
+    // morning should see "pinged, succeeded, bought nine minutes, slot not
+    // retired" without doing the arithmetic themselves.
+    emit(result.success ? (joinedOpenWindow ? "run.window-joined" : "run.success") : "run.failure", report);
     return report;
 }
 
