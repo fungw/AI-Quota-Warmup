@@ -6,6 +6,17 @@ export const MODEL = "claude-haiku-4-5-20251001";
 export const MAX_ATTEMPTS = 3;
 export const ATTEMPT_TIMEOUT_MS = 30_000;
 export const FIVE_HOURS_MS = 5 * 60 * 60 * 1000;
+/**
+ * Bug fix: how much window a successful ping must buy before we accept that it
+ * *opened* one. Observation says the reset is the previous ten-minute boundary
+ * plus five hours, so a genuinely fresh window reports five hours minus up to
+ * ten minutes of rounding minus request latency — ~4h50m in practice, never
+ * below 4h45m. A ping that merely joined a window somebody else opened (Claude
+ * Code's own background daemon does this overnight) reports whatever is left of
+ * that window, which has always been far less. 4h45m therefore separates the
+ * two without ever misreading a genuine anchor as a join.
+ */
+export const MIN_ANCHORED_WINDOW_MS = FIVE_HOURS_MS - 15 * 60_000;
 /** Bug fix: an uncapped `Retry-After` (e.g. 3600) would stall the whole invocation sleeping. */
 export const MAX_BACKOFF_MS = 60_000;
 /** Bug fix: bound on how far in the future a reset header is allowed to push the window. */

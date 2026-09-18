@@ -55,7 +55,11 @@ catch-up horizon and evaluates Claude and OpenAI independently:
 3. If Workers KV says the provider's current window is still open, it skips the
    network request and checks again on the next tick.
 4. Claude is called directly. Its response header supplies the next five-hour
-   reset, which the Worker stores in KV.
+   reset, which the Worker stores in KV. If that reset shows the ping merely
+   joined a window something else had already opened — less than 4h45m bought,
+   logged as `run.window-joined` — the target slot is left unserved, so the
+   first tick after the stored reset passes pings again and opens a real
+   window, provided the catch-up horizon has not expired.
 5. OpenAI is called through the bearer-protected Fly endpoint. Fly reads the
    live Codex limit first:
    - If the window is open, Fly returns the authoritative reset without making
